@@ -61,6 +61,6 @@ void updateSharedState(const JoystickState &rawState, double alpha, double deadZ
 
 // Continuously reads joystick events, updates the local state, and passes the result to head_shared.
 // Also updates the accumulative variables for L1/R1 and L2/R2 based on button events.
-void readJoystickEvents();
+void readJoystickEvents(bool &continueJoystickThread);
 
 #endif // JOYSTICK_H

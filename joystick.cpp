@@ -93,7 +93,7 @@ void updateSharedState(const JoystickState &localState, double alpha, double dea
        - For button index 7 (R2): if pressed, add 1.
    - Finally, updateSharedState() is called to process axis data.
 */
-void readJoystickEvents() {
+void readJoystickEvents(bool &continueJoystickThread) {
     const char* devicePath = "/dev/input/js0";  // Actual device path (check if it's js0, js1, etc.)
     int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -115,7 +115,7 @@ void readJoystickEvents() {
     // 원하는 루프 주기 (마이크로초 단위)
     const long DESIRED_LOOP_US = 1000; // 1ms
 
-    while (true) {
+    while (continueJoystickThread) {
         // 루프 시작 시각 기록  
         auto loop_start = std::chrono::steady_clock::now();
 

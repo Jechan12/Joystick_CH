@@ -7,8 +7,11 @@
 // Test main
 int main() {
     // Start joystick event thread
-    std::thread joystickThread(readJoystickEvents);
+    // std::thread joystickThread(readJoystickEvents);
+    bool continueJoystickThread = true;
 
+    // std::ref를 사용하여 참조로 전달합니다.
+    std::thread joystickThread(readJoystickEvents, std::ref(continueJoystickThread));  
     // Main thread periodically prints the shared state (head_shared) and accumulative button values
     while (true) {
         std::cout << std::setprecision(4);
