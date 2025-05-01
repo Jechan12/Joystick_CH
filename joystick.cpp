@@ -1,9 +1,18 @@
 #include "joystick.h"
 
+#include <iostream>
+#include <algorithm>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cmath>   // for std::fabs
+#include <chrono>  // for time measurement
+
+namespace joy {
+
 // Global shared state variable definition (must be defined exactly once)
+// 전역 상태 변수 정의 (헤더에서 extern으로 선언됨)
 JoystickState head_shared = {0};
 
-// New accumulative variables for button counts
 double lr1_accumulated = 0.0;
 double lr2_accumulated = 0.0;
 
@@ -12,10 +21,21 @@ double lowpassFilter_Joy(double previous, double current, double alpha) {
     return previous + alpha * (current - previous);
 }
 
-// Processes a normalized joystick value ([-1, 1]).
-// Returns 0 if the absolute value is below the dead zone threshold.
-// Otherwise, maps the value from [deadZoneThreshold, 1] to [0, 1] and applies quadratic scaling
-// for a smooth, gradual ramp-up while preserving the sign.
+/**
+ * @brief scaleJoystickOutput
+ *
+ * 1) Dead zone 처리:
+ *    절대값(absVal)이 deadZoneThreshold 이하면 0으로 간주해
+ *    손떨림이나 미세한 노이즈로 인한 불필요한 입력을 무시합니다.
+ *
+ * 2) Ramp-up 스케일링:
+ *    [deadZoneThreshold, 1] 구간을 [0,1]로 선형 매핑한 뒤
+ *    제곱(curve = x^2)을 적용해 저속 영역에서 더 부드러운 출력을 만듭니다.
+ *
+ * @param normalized        -1.0 ~ 1.0으로 정규화된 입력 값
+ * @param deadZoneThreshold 데드존 임계치 (0.0 ~ 1.0)
+ * @return 스케일링 후 출력 값 (-1.0 ~ 1.0)
+ */
 double scaleJoystickOutput(double normalized, double deadZoneThreshold) {
     double absVal = std::fabs(normalized);
     if (absVal < deadZoneThreshold) {
@@ -30,6 +50,16 @@ double scaleJoystickOutput(double normalized, double deadZoneThreshold) {
 
 // Applies a slew rate limiter to smooth the output changes.
 // Limits the change from 'previous' to 'desired' by at most 'maxDelta'.
+/**
+ * @brief applySlewRate (슬루율 리미터)
+ *
+ * 출력의 순간 변화량(diff)을 maxDelta로 제한해
+ *
+ * @param previous  직전 출력 값
+ * @param desired   목표 출력 값
+ * @param maxDelta  한 스텝당 허용 최대 변화량
+ * @return maxDelta 범위 내에서 부드럽게 보정된 출력 값
+ */
 double applySlewRate(double previous, double desired, double maxDelta) {
     double diff = desired - previous;
     if (diff > maxDelta) {
@@ -40,12 +70,39 @@ double applySlewRate(double previous, double desired, double maxDelta) {
     return previous + diff;
 }
 
+
+
+// raw ∈ [−32767 … +32767] 를 normalized ∈ [−1 … +1] 로 매핑
+double normalizeAxisValue(double raw) {
+    if (raw < 0.0) {
+        return raw / RAW_AXIS_MAX_NEG;
+    } else {
+        return raw / RAW_AXIS_MAX_POS;
+    }
+}
+
 /*
    updateSharedState:
    Updates head_shared by low-pass filtering raw axis values,
    normalizing them, and then applying scaling (dead zone + gradual ramp-up).
    Also applies a slew rate limiter (maxDelta is 0.1 for the first 1 second, then 0.001).
 */
+// ────────────────────────────────────────────────────────────────────────────
+/**
+ * @brief updateSharedState
+ *
+ * localState.axes[]에 들어온 raw 축 값을 아래 순서로 처리하여
+ * head_shared.axes[]에 저장하고, 버튼 상태는 그대로 복사합니다.
+ *
+ *  1) lowpassFilter_Joy로 노이즈 제거
+ *  2) normalizeAxisValue로 –1~1 정규화
+ *  3) scaleJoystickOutput으로 dead zone + 부드러운 ramp-up
+ *  4) applySlewRate로 슬루율 리미팅
+ *
+ * @param localState        생(raw) 입력이 담긴 구조체
+ * @param alpha             필터 계수
+ * @param deadZoneThreshold dead zone 임계치
+ */
 void updateSharedState(const JoystickState &localState, double alpha, double deadZoneThreshold) {
     // Use static variable to record the initial time.
     static auto initTime = std::chrono::steady_clock::now();
@@ -53,48 +110,95 @@ void updateSharedState(const JoystickState &localState, double alpha, double dea
     double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - initTime).count() / 1000.0;
     
     // Set maxDelta: 0.1 for first 1 second, then 0.001.
-    double maxDelta = (elapsed < 1.0) ? 0.1 : 0.001;
+    double maxDelta = (elapsed < SLEW_SWITCH_TIME_S) ? SLEW_INITIAL_MAX_DELTA : SLEW_RUNNING_MAX_DELTA;
     
     // Local filter state for each axis (persist between calls).
     // We can use a static local array for this purpose.
-    static double filteredRaw[MAX_AXES] = {0};
+    static double filteredRaw[joy::MAX_AXES] = {0};
     
-    for (int i = 0; i < MAX_AXES; i++) {
+    for (int i = 0; i < joy::MAX_AXES; i++) {
         // Update the low-pass filtered raw value for this axis.
         filteredRaw[i] = lowpassFilter_Joy(filteredRaw[i], localState.axes[i], alpha);
         
         // Normalize the filtered raw value.
-        double normalized;
-        if (filteredRaw[i] < 0)
-            normalized = filteredRaw[i] / 32768.0;
-        else
-            normalized = filteredRaw[i] / 32767.0;
+        double normalized = normalizeAxisValue(filteredRaw[i]);
         
         // Apply scaling function: dead zone + gradual ramp-up.
         double scaled = scaleJoystickOutput(normalized, deadZoneThreshold);
+#ifdef SLEW
         // Limit the rate of change for smoother transitions.
         double finalOutput = applySlewRate(head_shared.axes[i], scaled, maxDelta);
         head_shared.axes[i] = finalOutput;
+#else
+        head_shared.axes[i] = scaled;
+#endif
+
+
     }
-    for (int i = 0; i < MAX_BUTTONS; i++) {
+    for (int i = 0; i < joy::MAX_BUTTONS; i++) {
         head_shared.buttons[i] = localState.buttons[i];
     }
 }
 
 /*
+- For button events, in addition to storing the current button state,
+    accumulative variables are updated:
+  - For button index 4 (L1): if pressed, subtract 1.
+  - For button index 5 (R1): if pressed, add 1.
+  - For button index 6 (L2): if pressed, subtract 1.
+  - For button index 7 (R2): if pressed, add 1.
+*/
+/**
+ * @brief updateAccumulators
+ *
+ * L1/R1, L2/R2 버튼이 눌린 시간만큼 accumStep 단위로 값을 더하거나 빼
+ * lr1_accumulated, lr2_accumulated에 누적합니다.
+ * 누적값은 –1.0 ~ +1.0 범위로 클램핑됩니다.
+ *
+ * @param state      현재 버튼 상태가 담긴 구조체
+ * @param accumStep  한 스텝당 누적할 양 (초 또는 임의 단위)
+ */
+void updateAccumulators(const JoystickState &state, double accumStep) {
+    // L1 (BUTTON_L1) 누르면 감소, R1 누르면 증가
+    if (state.buttons[BUTTON_L1]) {
+        lr1_accumulated = std::clamp(lr1_accumulated - accumStep, -1.0, 1.0);
+    }
+    if (state.buttons[BUTTON_R1]) {
+        lr1_accumulated = std::clamp(lr1_accumulated + accumStep, -1.0, 1.0);
+    }
+
+    // L2 (BUTTON_L2) 누르면 감소, R2 누르면 증가
+    if (state.buttons[BUTTON_L2]) {
+        lr2_accumulated = std::clamp(lr2_accumulated - accumStep, -1.0, 1.0);
+    }
+    if (state.buttons[BUTTON_R2]) {
+        lr2_accumulated = std::clamp(lr2_accumulated + accumStep, -1.0, 1.0);
+    }
+}
+
+
+/*
    readJoystickEvents() reads raw joystick events and processes them:
    - Raw event data is stored in a local JoystickState structure.
    - For each event, if it's an axis event, its raw value is stored.
-   - For button events, in addition to storing the current button state,
-     accumulative variables are updated:
-       - For button index 4 (L1): if pressed, subtract 1.
-       - For button index 5 (R1): if pressed, add 1.
-       - For button index 6 (L2): if pressed, subtract 1.
-       - For button index 7 (R2): if pressed, add 1.
    - Finally, updateSharedState() is called to process axis data.
 */
+/**
+ * @brief readJoystickEvents
+ *
+ * 논블록킹으로 조이스틱 이벤트(/dev/input/js0)를 읽어
+ * 1) 축/버튼 이벤트를 localState에 저장
+ * 2) updateAccumulators 호출해 버튼 누적값 갱신
+ * 3) updateSharedState 호출해 축 값 필터·정규화·스케일링·슬루 적용
+ * 4) JOYSTICK_LOOP_US 주기로 루프
+ *
+ * 외부에서 continueJoystickThread를 false로 바꾸면
+ * 디바이스를 close하고 함수가 종료됩니다.
+ *
+ * @param continueJoystickThread  루프 동작 제어 변수
+ */
 void readJoystickEvents(bool &continueJoystickThread) {
-    const char* devicePath = "/dev/input/js0";  // Actual device path (check if it's js0, js1, etc.)
+    const char* devicePath = JOYSTICK_DEVICE;  
     int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         std::cerr << "Unable to open joystick device: " << devicePath << std::endl;
@@ -106,14 +210,14 @@ void readJoystickEvents(bool &continueJoystickThread) {
     struct js_event event;
     
     // Low-pass filter coefficient and dead zone threshold
-    double alpha = 0.1;              // Filter coefficient (0.0 ~ 1.0)
-    double deadZoneThreshold = 0.1;  // Dead zone threshold (user-defined)
+    double alpha = DEFAULT_ALPHA;              // Filter coefficient (0.0 ~ 1.0)
+    double deadZoneThreshold = DEFAULT_DEADZONE;  // Dead zone threshold (user-defined)
     
     // localState: holds raw axis and button data (as double for axes)
     JoystickState localState = {0};
     
     // 원하는 루프 주기 (마이크로초 단위)
-    const long DESIRED_LOOP_US = 1000; // 1ms
+    const long DESIRED_LOOP_US = JOYSTICK_LOOP_US; // 1ms
 
     while (continueJoystickThread) {
         // 루프 시작 시각 기록  
@@ -143,40 +247,7 @@ void readJoystickEvents(bool &continueJoystickThread) {
                 }
             }
         }
-        
-        // Update local accumulators based on button states.
-        // Button indices:
-        // L1 = 4: pressing decreases local_lr1
-        // R1 = 5: pressing increases local_lr1
-        // L2 = 6: pressing decreases local_lr2
-        // R2 = 7: pressing increases local_lr2
-        // Local accumulators for button counts (persist between loop iterations)
-        static double local_lr1 = 0.0;  // For L1 (button index 4) and R1 (button index 5)
-        static double local_lr2 = 0.0;  // For L2 (button index 6) and R2 (button index 7)
-
-        double dt = 0.001;  // 1ms loop interval; adjust as needed.
-        if (localState.buttons[4] == 1) {  // L1 pressed
-            local_lr1 -= dt;
-        }
-        if (localState.buttons[5] == 1) {  // R1 pressed
-            local_lr1 += dt;
-        }
-        if (localState.buttons[6] == 1) {  // L2 pressed
-            local_lr2 -= dt;
-        }
-        if (localState.buttons[7] == 1) {  // R2 pressed
-            local_lr2 += dt;
-        }
-        
-        // Clamp local accumulators between -1.0 and 1.0.
-        if (local_lr1 < -1.0) local_lr1 = -1.0;
-        if (local_lr1 > 1.0)  local_lr1 = 1.0;
-        if (local_lr2 < -1.0) local_lr2 = -1.0;
-        if (local_lr2 > 1.0)  local_lr2 = 1.0;
-        
-        // Update global shared accumulative variables with the local accumulators.
-        lr1_accumulated = local_lr1;
-        lr2_accumulated = local_lr2;
+        updateAccumulators(localState, accumStep);
         
         // Process the raw axis data: apply filtering, normalization, scaling, and slew rate limiting.
         updateSharedState(localState, alpha, deadZoneThreshold);
@@ -195,3 +266,5 @@ void readJoystickEvents(bool &continueJoystickThread) {
     
     close(fd);
 }
+
+}  // namespace joy

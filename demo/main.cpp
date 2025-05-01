@@ -11,27 +11,27 @@ int main() {
     bool continueJoystickThread = true;
 
     // std::ref를 사용하여 참조로 전달합니다.
-    std::thread joystickThread(readJoystickEvents, std::ref(continueJoystickThread));  
+    std::thread joystickThread(joy::readJoystickEvents, std::ref(continueJoystickThread));  
     // Main thread periodically prints the shared state (head_shared) and accumulative button values
     while (true) {
         std::cout << std::setprecision(4);
         std::cout << "----- Shared Joystick State -----" << std::endl;
         
         std::cout << "Axes: ";
-        for (int i = 0; i < MAX_AXES; i++) {
-            std::cout << head_shared.axes[i] << " ";
+        for (int i = 0; i < joy::MAX_AXES; i++) {
+            std::cout << joy::head_shared.axes[i] << " ";
         }
         std::cout << std::endl;
 
         std::cout << "Buttons: ";
-        for (int i = 0; i < MAX_BUTTONS; i++) {
-            std::cout << head_shared.buttons[i] << " ";
+        for (int i = 0; i < joy::MAX_BUTTONS; i++) {
+            std::cout <<joy:: head_shared.buttons[i] << " ";
         }
         std::cout << std::endl;
 
         // Print accumulative button values for L1/R1 and L2/R2.
-        std::cout << "L1/R1 Accumulated: " << lr1_accumulated << std::endl;
-        std::cout << "L2/R2 Accumulated: " << lr2_accumulated << std::endl;
+        std::cout << "L1/R1 Accumulated: " << joy::lr1_accumulated << std::endl;
+        std::cout << "L2/R2 Accumulated: " << joy::lr2_accumulated << std::endl;
         std::cout << std::endl;
 
         // Wait for 10 milliseconds

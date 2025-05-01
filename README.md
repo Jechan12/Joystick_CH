@@ -54,7 +54,7 @@ This repository contains C++ functions for reading and processing joystick input
 If all files (`main.cpp`, `joystick.cpp`, and `joystick.h`) are in the same directory (or arranged with `joystick.cpp` and `joystick.h` in the parent directory of `demo`), navigate to the appropriate directory and run:
 
 ```bash
-g++ -o joystick_test main.cpp joystick.cpp -pthread
+g++ -std=c++11 -I.. main.cpp ../joystick.cpp -o joystick_test -pthread
 
 or
 

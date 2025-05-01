@@ -1,22 +1,48 @@
 #ifndef JOYSTICK_H
 #define JOYSTICK_H
 
-#include <linux/joystick.h>
-#include <iostream>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <cstring>
-#include <cstdlib>
-#include <cmath>   // for std::fabs
-#include <chrono>  // for time measurement
+#include <linux/joystick.h>  // js_event 등 조이스틱 타입 정의
 
+namespace joy { 
 // Debug real-time output control (uncomment to enable output)
 // #define Data_print
 
-// Define maximum number of axes and buttons (modify if needed)
-#define MAX_AXES 8
-#define MAX_BUTTONS 13
+// ── Configuration Constants ────────────────────────────────────────────
+// #define SLEW // 정의하면 lowpass filter 친 이후에 SLEW 까지 적용하여 maxdelta 제한
+
+// (필요에 따라 조정하세요)
+// Joystick device path
+constexpr char   JOYSTICK_DEVICE[]       = "/dev/input/js0";  // Actual device path (check if it's js0, js1, etc.)
+
+// Loop timing (in microseconds)
+constexpr long   JOYSTICK_LOOP_US        = 1000;   // 1 ms
+
+ // Low-pass filter coefficient and dead-zone threshold
+ constexpr double DEFAULT_ALPHA           = 0.001;    // 필터 계수 [0.0 ~ 1.0]  0.005
+ constexpr double DEFAULT_DEADZONE        = 0.1;    // normalized units
+
+// Slew-rate limiting
+constexpr double SLEW_INITIAL_MAX_DELTA  = 0.1;    // first SLEW_SWITCH_TIME_S seconds
+constexpr double SLEW_RUNNING_MAX_DELTA  = 0.001;  // 이후
+constexpr double SLEW_SWITCH_TIME_S      = 1.0;    // seconds
+
+// Button indices for accumulators
+constexpr int    BUTTON_L1               = 4;
+constexpr int    BUTTON_R1               = 5;
+constexpr int    BUTTON_L2               = 6;
+constexpr int    BUTTON_R2               = 7;
+
+constexpr double accumStep = 0.001; // L1&R1 , L2&R2 누적 값 . 속도조절 
+
+// Raw axis value max (abs). negative 방향과 positive 방향이 약간 다르므로 분리.
+constexpr double RAW_AXIS_MAX_NEG        = 32767.0;  // 음수 측 최대 절대값
+constexpr double RAW_AXIS_MAX_POS        = 32767.0;  // 양수 측 최대 절대값
+
+// 최대 축/버튼 개수
+constexpr int MAX_AXES =  8;
+constexpr int MAX_BUTTONS =  13;
+// ──────────────────────────────────────────────────────────────────────
+
 
 // Shared state variable: Data to be read by the controller thread
 struct JoystickState {
@@ -34,33 +60,26 @@ extern double lr1_accumulated;
 // For L2 (button index 6) and R2 (button index 7): pressing L2 decrements, R2 increments.
 extern double lr2_accumulated;
 
-// Normalize the raw value to a double in the range -1.0 ~ 1.0
-double normalizeAxisValue(int raw);
 
-/*
-   scaleJoystickOutput:
-   - Processes a normalized joystick value in the range [-1, 1].
-   - Returns 0 if the absolute value is below the dead zone threshold.
-   - For values above the threshold, subtracts the dead zone, scales the remaining portion to [0, 1],
-     applies a quadratic curve for a gradual ramp-up, and then restores the original sign.
-   - This function ensures a smooth transition from zero input to full output.
-*/
-double scaleJoystickOutput(double normalized, double deadZoneThreshold);
-
-// Low-pass filter function: Interpolates between previous and current values using the alpha coefficient
-double lowpassFilter_Joy(double previous, double current, double alpha);
-
-/*
-   updateSharedState:
-   - For each axis, update the local low-pass filter state using raw data from localState.
-   - Then, normalize the filtered value (mapping the raw range to [-1,1]) and apply scaling.
-   - The final processed values are stored in head_shared.
-   (Button states are simply copied.)
-*/
-void updateSharedState(const JoystickState &rawState, double alpha, double deadZoneThreshold);
-
-// Continuously reads joystick events, updates the local state, and passes the result to head_shared.
-// Also updates the accumulative variables for L1/R1 and L2/R2 based on button events.
+/**
+ * @brief 조이스틱 이벤트를 지속적으로 읽고 처리하는 함수
+ *
+ * 이 함수는 별도의 스레드에서 실행되며, 아래 과정을 반복합니다:
+ * 1. JOYSTICK_DEVICE 경로의 조이스틱 디바이스를 논블록킹 모드로 open
+ * 2. js_event 구조체로부터 축(axis) 및 버튼 이벤트를 읽어 localState에 저장
+ *    - 축 이벤트: raw 값을 localState.axes[index]에 대입
+ *    - 버튼 이벤트: state 값을 localState.buttons[index]에 대입
+ * 3. BUTTON_L1/R1, BUTTON_L2/R2 버튼 상태에 따라 lr1_accumulated, lr2_accumulated를
+ *    ACCUM_STEP 만큼 감소/증가시켜 누적값을 갱신
+ * 4. updateSharedState() 호출을 통해
+ *    low-pass 필터 → 정규화 → 데드존+스케일링 → 슬루율 제한 순으로
+ *    최종 축 값을 head_shared.axes에 저장, 버튼 상태는 head_shared.buttons에 복사
+ * 5. 루프 주기(JOYSTICK_LOOP_US 마이크로초)를 맞춰 usleep으로 대기
+ * 6. 외부에서 continueJoystickThread를 false로 설정하면 루프를 빠져나가고 디바이스를 close
+ *
+ * @param continueJoystickThread  true인 동안 루프 실행, false로 변경 시 루프 종료
+ */
 void readJoystickEvents(bool &continueJoystickThread);
 
+}  // namespace joy
 #endif // JOYSTICK_H
