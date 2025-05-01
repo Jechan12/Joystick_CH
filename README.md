@@ -1,63 +1,80 @@
 # Joystick_CH
 
-This repository contains C++ functions for reading and processing joystick input on Linux systems (using the `/dev/input/js*` interface). It includes features such as low-pass filtering, normalization, dead zone handling, scaling (with gradual ramp-up), slew rate limiting, and accumulative button counts for specific buttons.
+This repository provides a C++ library for reading and processing joystick input on Linux (`/dev/input/js*`). It supports:
+
+- Low-pass filtering  
+- Dead-zone handling  
+- Normalization to [–1, +1]  
+- Quadratic “ramp-up” scaling  
+- Optional slew-rate limiting  
+- Accumulative button counters  
+- A hard-real-time 1 kHz loop  
 
 
 ![Joystick axis num](./images/joystickAxisNum.png)
 
 ## Features
 
-- **Joystick State Processing:**  
-  Reads raw joystick events and stores normalized axis values (range: -1 to 1) along with button states.
+- **State Processing**  
+  A dedicated thread runs `joy::readJoystickEvents(running)` to:
+  1. Open the joystick device (`JOYSTICK_DEVICE`) in non-blocking mode  
+  2. Read `js_event` messages for axes and buttons  
+  3. Update `joy::head_shared.axes[]` (double in [–1,1]) and `joy::head_shared.buttons[]` (0/1)
 
-- **Low-Pass Filtering & Dead Zone:**  
-  Applies a low-pass filter to smooth out noisy raw values, then normalizes them and applies a dead zone threshold.
+- **Low-Pass Filter & Dead-Zone**  
+  - `joy::lowpassFilter_Joy(prev, cur, DEFAULT_ALPHA)` smooths out noise.  
+  - Inputs within `±DEFAULT_DEADZONE` map to zero to ignore small jitters.
 
-- **Scaling & Slew Rate Limiting:**  
-  Scales the normalized values with a quadratic ramp-up for a smooth transition from 0 to full output, and limits the rate of change to prevent abrupt movements.
+- **Quadratic Scaling & Optional Slew-Rate**  
+  - `joy::scaleJoystickOutput(x, DEFAULT_DEADZONE)` applies an x² curve for smooth ramp-up.  
+  - Define `SLEW` to also apply `joy::applySlewRate(...)`, which clamps each step’s change to **SLEW_INITIAL_MAX_DELTA** (first second) or **SLEW_RUNNING_MAX_DELTA** thereafter.
 
-- **Accumulative Button Counters:**  
-  Maintains two global accumulative variables:  
-  - **lr1_accumulated:** For L1 (button index 4) and R1 (button index 5) — L1 decrements and R1 increments the value.  
-  - **lr2_accumulated:** For L2 (button index 6) and R2 (button index 7) — L2 decrements and R2 increments the value.  
-  These values are clamped between -1.0 and 1.0.
+- **Accumulative Button Counters**  
+  - `joy::lr1_accumulated` is decreased by **ACCUM_STEP** when L1 (button 4) is pressed and increased by **ACCUM_STEP** when R1 (button 5) is pressed.  
+  - `joy::lr2_accumulated` likewise for L2 (6) / R2 (7).  
+  - Values are clamped to [–1, +1].
 
-- **Real-Time Loop at 1 kHz:**  
-  The event loop measures its execution time and sleeps for the remaining time, ensuring each iteration takes exactly 1ms.
+- **Hard Real-Time 1 kHz Loop**  
+  Each iteration measures its own duration and sleeps the remainder of **JOYSTICK_LOOP_US** (1 ms) via `usleep()`, ensuring a consistent 1 kHz update rate.
 
 ## File Structure
 
-- **joystick.h:**  
-  Contains the declarations for the `JoystickState` structure, global shared variables, and function prototypes for normalization, filtering, scaling, accumulative button updates, and reading joystick events.
+### joystick.h
 
-- **joystick.cpp:**  
-  Implements the joystick processing functions:
-  - Low-pass filter (`lowpassFilter_Joy`)
-  - Scaling function (`scaleJoystickOutput`)
-  - Slew rate limiter (`applySlewRate`)
-  - State update function (`updateSharedState`)
-  - Joystick event loop (`readJoystickEvents`), which also updates accumulative button counters
+- **Tunable constants**  
+  - `JOYSTICK_DEVICE`, `JOYSTICK_LOOP_US`, `DEFAULT_ALPHA`, `DEFAULT_DEADZONE`  
+  - `SLEW_INITIAL_MAX_DELTA`, `SLEW_RUNNING_MAX_DELTA`, `SLEW_SWITCH_TIME_S`  
+  - `BUTTON_L1…R2`, `ACCUM_STEP`, `RAW_AXIS_MAX_NEG/POS`  
+- **Public types & globals**  
+  - `struct JoystickState { double axes[ MAX_AXES ]; int buttons[ MAX_BUTTONS ]; }`  
+  - `extern JoystickState head_shared;`  
+  - `extern double lr1_accumulated, lr2_accumulated;`  
+- **Public API**  
+  - `void readJoystickEvents(bool &running);`
 
-- **main.cpp:**  
-  A demo application that launches the joystick event thread and periodically prints the current shared joystick state (axes and buttons) and the accumulative button values.
+### joystick.cpp
+
+- Implements all helper functions inside an anonymous namespace:  
+  `lowpassFilter_Joy`, `normalizeAxisValue`, `scaleJoystickOutput`, `applySlewRate`, `updateSharedState`, `updateAccumulators`  
+- Defines `joy::readJoystickEvents(...)` which ties it all together in a 1 kHz loop.
+
+### demo/main.cpp
+
+- Spawns a `std::thread` running `joy::readJoystickEvents(running)`  
+- In the main thread, prints `joy::head_shared` and `joy::lr?_accumulated` every 10 ms
 
 ## Building the Project
 
-### Prerequisites
-
-- A Linux environment with joystick support (e.g., a PS4 DualShock or similar device)
-- A C++ compiler supporting C++11 or later (e.g., `g++`)
-- POSIX threads support
-
-### Compile from the Command Line
-
-If all files (`main.cpp`, `joystick.cpp`, and `joystick.h`) are in the same directory (or arranged with `joystick.cpp` and `joystick.h` in the parent directory of `demo`), navigate to the appropriate directory and run:
+**Prerequisites**  
+- Linux with `/dev/input/js*` joystick support  
+- A C++17 compiler (e.g. `g++`)  
+- POSIX Threads
 
 ```bash
-g++ -std=c++11 -I.. main.cpp ../joystick.cpp -o joystick_test -pthread
-
-or
-
 cd demo
 
-./joytest
+# Build without slew-rate limiting
+g++ -std=c++17 -I.. main.cpp ../joystick.cpp -o joystick_test -pthread
+
+# Run
+./joystick_test

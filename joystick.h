@@ -7,10 +7,10 @@ namespace joy {
 // Debug real-time output control (uncomment to enable output)
 // #define Data_print
 
-// ── Configuration Constants ────────────────────────────────────────────
-// #define SLEW // 정의하면 lowpass filter 친 이후에 SLEW 까지 적용하여 maxdelta 제한
+// ──  Configuration Constants  ────────────────────────────────────────────────────────────────
+// #define SLEW                   // 정의하면 lowpass filter 친 이후에 SLEW 까지 적용하여 maxdelta 제한
 
-// (필요에 따라 조정하세요)
+/////////           [ Adjust as needed , 필요에 따라 조정하세요 ]        ///////////////////////////
 // Joystick device path
 constexpr char   JOYSTICK_DEVICE[]       = "/dev/input/js0";  // Actual device path (check if it's js0, js1, etc.)
 
@@ -41,7 +41,7 @@ constexpr double RAW_AXIS_MAX_POS        = 32767.0;  // 양수 측 최대 절대
 // 최대 축/버튼 개수
 constexpr int MAX_AXES =  8;
 constexpr int MAX_BUTTONS =  13;
-// ──────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────────────────
 
 
 // Shared state variable: Data to be read by the controller thread
@@ -51,13 +51,16 @@ struct JoystickState {
 };
 
 // Global shared state variable for axes/buttons
+// 전역 공유 상태 변수: low-pass 필터 → 정규화 → 스케일링된 축 값과 버튼 상태를 보관합니다.
 extern JoystickState head_shared;
 
 // Shared accumulative variables for button counts:
 // For L1 (button index 4) and R1 (button index 5): pressing L1 decrements, R1 increments.
+// 누적 버튼 카운터 - lr1_accumulated: L1(버튼 4)을 누르면 값이 감소하고, R1(버튼 5)을 누르면 값이 증가합니다.
 extern double lr1_accumulated;
 
 // For L2 (button index 6) and R2 (button index 7): pressing L2 decrements, R2 increments.
+// 누적 버튼 카운터 - lr2_accumulated: L2(버튼 6)을 누르면 값이 감소하고, R2(버튼 7)을 누르면 값이 증가합니다
 extern double lr2_accumulated;
 
 
