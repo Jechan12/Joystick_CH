@@ -2,6 +2,9 @@
 
 This repository contains C++ functions for reading and processing joystick input on Linux systems (using the `/dev/input/js*` interface). It includes features such as low-pass filtering, normalization, dead zone handling, scaling (with gradual ramp-up), slew rate limiting, and accumulative button counts for specific buttons.
 
+
+![Joystick axis num](./images/joystickAxisNum.png)
+
 ## Features
 
 - **Joystick State Processing:**  
@@ -52,3 +55,9 @@ If all files (`main.cpp`, `joystick.cpp`, and `joystick.h`) are in the same dire
 
 ```bash
 g++ -o joystick_test main.cpp joystick.cpp -pthread
+
+or
+
+cd demo
+
+./joytest
