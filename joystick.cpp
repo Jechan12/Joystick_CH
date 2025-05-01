@@ -9,6 +9,9 @@
 
 namespace joy {
 
+// 초기값은 false (입력 무시)
+std::atomic<bool> inputEnabled{false};
+
 // Global shared state variable definition (must be defined exactly once)
 // 전역 상태 변수 정의 (헤더에서 extern으로 선언됨)
 JoystickState head_shared = {0};
@@ -104,6 +107,7 @@ double normalizeAxisValue(double raw) {
  * @param deadZoneThreshold dead zone 임계치
  */
 void updateSharedState(const JoystickState &localState, double alpha, double deadZoneThreshold) {
+    
     // Use static variable to record the initial time.
     static auto initTime = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
@@ -111,10 +115,31 @@ void updateSharedState(const JoystickState &localState, double alpha, double dea
     
     // Set maxDelta: 0.1 for first 1 second, then 0.001.
     double maxDelta = (elapsed < SLEW_SWITCH_TIME_S) ? SLEW_INITIAL_MAX_DELTA : SLEW_RUNNING_MAX_DELTA;
+
+    // 첫 호출일 때는 filteredRaw를 raw 값으로 채워서 
+    // 0→–1 과도 현상을 방지합니다. (특히 L2 R2)
+    static bool firstCall = true;
     
     // Local filter state for each axis (persist between calls).
     // We can use a static local array for this purpose.
     static double filteredRaw[joy::MAX_AXES] = {0};
+
+    if (firstCall) {
+            for (int i = 0; i < MAX_AXES; ++i) {
+                // raw 값 그대로 초기 세팅
+                filteredRaw[i] = localState.axes[i];
+                // 즉시 head_shared에 반영 (데드존+스케일링만)
+                double norm   = normalizeAxisValue(filteredRaw[i]);
+                double scaled = scaleJoystickOutput(norm, deadZoneThreshold);
+                head_shared.axes[i] = scaled;
+            }
+            // 버튼도 바로 복사
+            for (int i = 0; i < MAX_BUTTONS; ++i) {
+                head_shared.buttons[i] = localState.buttons[i];
+            }
+            firstCall = false;
+            return;
+    }
     
     for (int i = 0; i < joy::MAX_AXES; i++) {
         // Update the low-pass filtered raw value for this axis.
@@ -219,6 +244,9 @@ void readJoystickEvents(bool &continueJoystickThread) {
     // 원하는 루프 주기 (마이크로초 단위)
     const long DESIRED_LOOP_US = JOYSTICK_LOOP_US; // 1ms
 
+    auto startTime = std::chrono::steady_clock::now();
+    bool initDone = false;
+
     while (continueJoystickThread) {
         // 루프 시작 시각 기록  
         auto loop_start = std::chrono::steady_clock::now();
@@ -247,11 +275,33 @@ void readJoystickEvents(bool &continueJoystickThread) {
                 }
             }
         }
-        updateAccumulators(localState, accumStep);
         
-        // Process the raw axis data: apply filtering, normalization, scaling, and slew rate limiting.
-        updateSharedState(localState, alpha, deadZoneThreshold);
-        
+        // 2) initDone 전에는 START 버튼만 복사
+        if (!initDone) {
+            head_shared.buttons[BUTTON_START] = localState.buttons[BUTTON_START];
+        }
+
+        // 3) 초기화 완료 조건: INIT_DELAY_SEC 경과 + START 버튼 눌림
+        if (!initDone) {
+            double elapsed_init = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now() - startTime
+                             ).count();
+            if (elapsed_init >= INIT_DELAY_SEC
+                && head_shared.buttons[BUTTON_START] == 1)
+            {
+                inputEnabled.store(true);
+                initDone = true;
+                std::cout << "[INFO] Joystick enabled after START pressed.\n";
+            }
+        }
+
+        // **입력 허용 플래그가 true일 때만 실제 반영**  
+        if (inputEnabled.load()) {
+            updateAccumulators(localState, accumStep);
+            
+            // Process the raw axis data: apply filtering, normalization, scaling, and slew rate limiting.
+            updateSharedState(localState, alpha, deadZoneThreshold);
+        }
         // 루프 종료 시각 기록
         auto loop_end = std::chrono::steady_clock::now();
         // 실제 걸린 시간(마이크로초)

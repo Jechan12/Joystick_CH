@@ -2,10 +2,16 @@
 #define JOYSTICK_H
 
 #include <linux/joystick.h>  // js_event 등 조이스틱 타입 정의
+#include <atomic>
+
+
+
 
 namespace joy { 
 // Debug real-time output control (uncomment to enable output)
 // #define Data_print
+
+extern std::atomic<bool> inputEnabled;    // true여야만 readJoystickEvents가 값을 반영합니다.
 
 // ──  Configuration Constants  ────────────────────────────────────────────────────────────────
 // #define SLEW                   // 정의하면 lowpass filter 친 이후에 SLEW 까지 적용하여 maxdelta 제한
@@ -18,7 +24,7 @@ constexpr char   JOYSTICK_DEVICE[]       = "/dev/input/js0";  // Actual device p
 constexpr long   JOYSTICK_LOOP_US        = 1000;   // 1 ms
 
  // Low-pass filter coefficient and dead-zone threshold
- constexpr double DEFAULT_ALPHA           = 0.001;    // 필터 계수 [0.0 ~ 1.0]  0.005
+ constexpr double DEFAULT_ALPHA           = 0.0015;    // 필터 계수 [0.0 ~ 1.0] 
  constexpr double DEFAULT_DEADZONE        = 0.1;    // normalized units
 
 // Slew-rate limiting
@@ -41,6 +47,10 @@ constexpr double RAW_AXIS_MAX_POS        = 32767.0;  // 양수 측 최대 절대
 // 최대 축/버튼 개수
 constexpr int MAX_AXES =  8;
 constexpr int MAX_BUTTONS =  13;
+
+// 초기화 완료까지 대기할 시간 (초)
+constexpr double INIT_DELAY_SEC = 3.0;
+constexpr int BUTTON_START = 11;
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 

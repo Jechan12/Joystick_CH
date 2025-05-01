@@ -8,8 +8,8 @@ This repository provides a C++ library for reading and processing joystick input
 - Quadratic “ramp-up” scaling  
 - Optional slew-rate limiting  
 - Accumulative button counters  
-- A hard-real-time 1 kHz loop  
-
+- **Initialization gating** (time + button)  
+- A hard real-time 1 kHz loop  
 
 ![Joystick axis num](./images/joystickAxisNum.png)
 
@@ -19,7 +19,7 @@ This repository provides a C++ library for reading and processing joystick input
   A dedicated thread runs `joy::readJoystickEvents(running)` to:
   1. Open the joystick device (`JOYSTICK_DEVICE`) in non-blocking mode  
   2. Read `js_event` messages for axes and buttons  
-  3. Update `joy::head_shared.axes[]` (double in [–1,1]) and `joy::head_shared.buttons[]` (0/1)
+  3. Update `joy::head_shared.axes[]` (double in [–1,1]) and `joy::head_shared.buttons[]` (0/1)  
 
 - **Low-Pass Filter & Dead-Zone**  
   - `joy::lowpassFilter_Joy(prev, cur, DEFAULT_ALPHA)` smooths out noise.  
@@ -34,10 +34,26 @@ This repository provides a C++ library for reading and processing joystick input
   - `joy::lr2_accumulated` likewise for L2 (6) / R2 (7).  
   - Values are clamped to [–1, +1].
 
+- **Initialization Gating (Time + Button)**  
+  - The library will ignore **axis** updates until:
+    1. **INIT_DELAY_SEC** seconds have elapsed since `readJoystickEvents` started, **and**  
+    2. The **START** button (`BUTTON_START`) is pressed.  
+  - During this “init delay” only the START button state is visible; all other inputs are held at zero.  
+  - Tweak `INIT_DELAY_SEC` (in `joystick.h`) to set the delay, or set it to `0.0` to require only the START-button press.
+
 - **Hard Real-Time 1 kHz Loop**  
   Each iteration measures its own duration and sleeps the remainder of **JOYSTICK_LOOP_US** (1 ms) via `usleep()`, ensuring a consistent 1 kHz update rate.
 
 ## File Structure
+```plaintext
+.
+├── demo/
+│   └── main.cpp           # Demo: spawns readJoystickEvents thread and prints state
+├── images/
+│   └── joystickAxisNum.png
+├── joystick.h             # Public API, tunable constants & init gating flags
+└── joystick.cpp           # Internal helpers & event-loop implementation
+```
 
 ### joystick.h
 
@@ -45,8 +61,11 @@ This repository provides a C++ library for reading and processing joystick input
   - `JOYSTICK_DEVICE`, `JOYSTICK_LOOP_US`, `DEFAULT_ALPHA`, `DEFAULT_DEADZONE`  
   - `SLEW_INITIAL_MAX_DELTA`, `SLEW_RUNNING_MAX_DELTA`, `SLEW_SWITCH_TIME_S`  
   - `BUTTON_L1…R2`, `ACCUM_STEP`, `RAW_AXIS_MAX_NEG/POS`  
+  - **`INIT_DELAY_SEC`**, **`BUTTON_START`** (init gating)  
+- **Initialization flag**  
+  - `extern std::atomic<bool> inputEnabled;`  
 - **Public types & globals**  
-  - `struct JoystickState { double axes[ MAX_AXES ]; int buttons[ MAX_BUTTONS ]; }`  
+  - `struct JoystickState { double axes[MAX_AXES]; int buttons[MAX_BUTTONS]; }`  
   - `extern JoystickState head_shared;`  
   - `extern double lr1_accumulated, lr2_accumulated;`  
 - **Public API**  
@@ -56,14 +75,14 @@ This repository provides a C++ library for reading and processing joystick input
 
 - Implements all helper functions inside an anonymous namespace:  
   `lowpassFilter_Joy`, `normalizeAxisValue`, `scaleJoystickOutput`, `applySlewRate`, `updateSharedState`, `updateAccumulators`  
-- Defines `joy::readJoystickEvents(...)` which ties it all together in a 1 kHz loop.
+- Defines `joy::readJoystickEvents(...)`, including the **5-second + START-button gating** via `inputEnabled`.
 
 ### demo/main.cpp
 
 - Spawns a `std::thread` running `joy::readJoystickEvents(running)`  
 - In the main thread, prints `joy::head_shared` and `joy::lr?_accumulated` every 10 ms
 
-## Building the Project
+## Building & Running
 
 **Prerequisites**  
 - Linux with `/dev/input/js*` joystick support  
@@ -73,7 +92,7 @@ This repository provides a C++ library for reading and processing joystick input
 ```bash
 cd demo
 
-# Build without slew-rate limiting
+# Build (SLEW optional via -DSLEW)
 g++ -std=c++17 -I.. main.cpp ../joystick.cpp -o joystick_test -pthread
 
 # Run
