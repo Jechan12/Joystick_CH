@@ -21,16 +21,16 @@ extern std::atomic<bool> inputEnabled;    // true여야만 readJoystickEvents가
 constexpr char   JOYSTICK_DEVICE[]       = "/dev/input/js0";  // Actual device path (check if it's js0, js1, etc.)
 
 // Loop timing (in microseconds)
-constexpr long   JOYSTICK_LOOP_US        = 1000;   // 1 ms
+constexpr unsigned   JOYSTICK_LOOP_US        = 1000;   // 1 ms
 
  // Low-pass filter coefficient and dead-zone threshold
- constexpr double DEFAULT_ALPHA           = 0.0015;    // 필터 계수 [0.0 ~ 1.0] 
- constexpr double DEFAULT_DEADZONE        = 0.1;    // normalized units
+constexpr float DEFAULT_ALPHA           = 0.0015f;    // 필터 계수 [0.0 ~ 1.0] 
+constexpr float DEFAULT_DEADZONE        = 0.1f;    // normalized units
 
 // Slew-rate limiting
-constexpr double SLEW_INITIAL_MAX_DELTA  = 0.1;    // first SLEW_SWITCH_TIME_S seconds
-constexpr double SLEW_RUNNING_MAX_DELTA  = 0.001;  // 이후
-constexpr double SLEW_SWITCH_TIME_S      = 1.0;    // seconds
+constexpr float SLEW_INITIAL_MAX_DELTA  = 0.1f;    // first SLEW_SWITCH_TIME_S seconds
+constexpr float SLEW_RUNNING_MAX_DELTA  = 0.001f;  // 이후
+constexpr float SLEW_SWITCH_TIME_S      = 1.0f;    // seconds
 
 // Button indices for accumulators
 constexpr int    BUTTON_L1               = 4;
@@ -41,22 +41,23 @@ constexpr int    BUTTON_R2               = 7;
 constexpr double accumStep = 0.001; // L1&R1 , L2&R2 누적 값 . 속도조절 
 
 // Raw axis value max (abs). negative 방향과 positive 방향이 약간 다르므로 분리.
-constexpr double RAW_AXIS_MAX_NEG        = 32767.0;  // 음수 측 최대 절대값
-constexpr double RAW_AXIS_MAX_POS        = 32767.0;  // 양수 측 최대 절대값
+constexpr float RAW_AXIS_MAX_NEG        = 32767.0f;  // 음수 측 최대 절대값
+constexpr float RAW_AXIS_MAX_POS        = 32767.0f;  // 양수 측 최대 절대값
 
 // 최대 축/버튼 개수
 constexpr int MAX_AXES =  8;
 constexpr int MAX_BUTTONS =  13;
 
 // 초기화 완료까지 대기할 시간 (초)
-constexpr double INIT_DELAY_SEC = 3.0;
+constexpr float INIT_DELAY_SEC = 3.0f;
+// 시간과 함께 값 받아오기 시작할 버튼
 constexpr int BUTTON_START = 11;
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 
 // Shared state variable: Data to be read by the controller thread
 struct JoystickState {
-    double axes[MAX_AXES];   // Normalized values after applying low-pass filter
+    float axes[MAX_AXES];   // Normalized values after applying low-pass filter
     int buttons[MAX_BUTTONS]; // Button states (0 or 1)
 };
 
@@ -67,11 +68,11 @@ extern JoystickState head_shared;
 // Shared accumulative variables for button counts:
 // For L1 (button index 4) and R1 (button index 5): pressing L1 decrements, R1 increments.
 // 누적 버튼 카운터 - lr1_accumulated: L1(버튼 4)을 누르면 값이 감소하고, R1(버튼 5)을 누르면 값이 증가합니다.
-extern double lr1_accumulated;
+extern float lr1_accumulated;
 
 // For L2 (button index 6) and R2 (button index 7): pressing L2 decrements, R2 increments.
 // 누적 버튼 카운터 - lr2_accumulated: L2(버튼 6)을 누르면 값이 감소하고, R2(버튼 7)을 누르면 값이 증가합니다
-extern double lr2_accumulated;
+extern float lr2_accumulated;
 
 
 /**

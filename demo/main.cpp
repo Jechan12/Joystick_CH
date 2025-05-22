@@ -13,7 +13,6 @@ int main() {
 
     // 3) 시작 시각 기록
     auto t0 = std::chrono::steady_clock::now();
-    bool initDone = false;
 
     // std::ref를 사용하여 참조로 전달합니다.
     //  - readJoystickEvents가 bool&으로 플래그를 받기 때문에, 

@@ -16,11 +16,11 @@ std::atomic<bool> inputEnabled{false};
 // 전역 상태 변수 정의 (헤더에서 extern으로 선언됨)
 JoystickState head_shared = {0};
 
-double lr1_accumulated = 0.0;
-double lr2_accumulated = 0.0;
+float lr1_accumulated = 0.0f;
+float lr2_accumulated = 0.0f;
 
 // Low-pass filter function (exponential moving average)
-double lowpassFilter_Joy(double previous, double current, double alpha) {
+float lowpassFilter_Joy(float previous, float current, float alpha) {
     return previous + alpha * (current - previous);
 }
 
@@ -39,15 +39,15 @@ double lowpassFilter_Joy(double previous, double current, double alpha) {
  * @param deadZoneThreshold 데드존 임계치 (0.0 ~ 1.0)
  * @return 스케일링 후 출력 값 (-1.0 ~ 1.0)
  */
-double scaleJoystickOutput(double normalized, double deadZoneThreshold) {
-    double absVal = std::fabs(normalized);
+float scaleJoystickOutput(float normalized, float deadZoneThreshold) {
+    float absVal = std::fabs(normalized);
     if (absVal < deadZoneThreshold) {
-        return 0.0;
+        return 0.0f;
     }
     // Compute adjusted value: linearly map [deadZoneThreshold, 1] to [0, 1]
-    double adjusted = (absVal - deadZoneThreshold) / (1.0 - deadZoneThreshold);
+    float adjusted = (absVal - deadZoneThreshold) / (1.0f - deadZoneThreshold);
     // Apply a quadratic scaling for a smoother, gradual ramp-up.
-    adjusted = std::pow(adjusted, 2.0);
+    adjusted = std::pow(adjusted, 2.0f); 
     return (normalized >= 0) ? adjusted : -adjusted;
 }
 
@@ -63,8 +63,8 @@ double scaleJoystickOutput(double normalized, double deadZoneThreshold) {
  * @param maxDelta  한 스텝당 허용 최대 변화량
  * @return maxDelta 범위 내에서 부드럽게 보정된 출력 값
  */
-double applySlewRate(double previous, double desired, double maxDelta) {
-    double diff = desired - previous;
+float applySlewRate(float previous, float desired, float maxDelta) {
+    float diff = desired - previous;
     if (diff > maxDelta) {
         diff = maxDelta;
     } else if (diff < -maxDelta) {
@@ -76,8 +76,8 @@ double applySlewRate(double previous, double desired, double maxDelta) {
 
 
 // raw ∈ [−32767 … +32767] 를 normalized ∈ [−1 … +1] 로 매핑
-double normalizeAxisValue(double raw) {
-    if (raw < 0.0) {
+float normalizeAxisValue(float raw) {
+    if (raw < 0.0f) {
         return raw / RAW_AXIS_MAX_NEG;
     } else {
         return raw / RAW_AXIS_MAX_POS;
@@ -106,15 +106,15 @@ double normalizeAxisValue(double raw) {
  * @param alpha             필터 계수
  * @param deadZoneThreshold dead zone 임계치
  */
-void updateSharedState(const JoystickState &localState, double alpha, double deadZoneThreshold) {
+void updateSharedState(const JoystickState &localState, float alpha, float deadZoneThreshold) {
     
     // Use static variable to record the initial time.
     static auto initTime = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - initTime).count() / 1000.0;
+    float elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - initTime).count() / 1000.0f;
     
     // Set maxDelta: 0.1 for first 1 second, then 0.001.
-    double maxDelta = (elapsed < SLEW_SWITCH_TIME_S) ? SLEW_INITIAL_MAX_DELTA : SLEW_RUNNING_MAX_DELTA;
+    float maxDelta = (elapsed < SLEW_SWITCH_TIME_S) ? SLEW_INITIAL_MAX_DELTA : SLEW_RUNNING_MAX_DELTA;
 
     // 첫 호출일 때는 filteredRaw를 raw 값으로 채워서 
     // 0→–1 과도 현상을 방지합니다. (특히 L2 R2)
@@ -122,15 +122,15 @@ void updateSharedState(const JoystickState &localState, double alpha, double dea
     
     // Local filter state for each axis (persist between calls).
     // We can use a static local array for this purpose.
-    static double filteredRaw[joy::MAX_AXES] = {0};
+    static float filteredRaw[joy::MAX_AXES] = {0.0f};
 
     if (firstCall) {
             for (int i = 0; i < MAX_AXES; ++i) {
                 // raw 값 그대로 초기 세팅
                 filteredRaw[i] = localState.axes[i];
                 // 즉시 head_shared에 반영 (데드존+스케일링만)
-                double norm   = normalizeAxisValue(filteredRaw[i]);
-                double scaled = scaleJoystickOutput(norm, deadZoneThreshold);
+                float norm   = normalizeAxisValue(filteredRaw[i]);
+                float scaled = scaleJoystickOutput(norm, deadZoneThreshold);
                 head_shared.axes[i] = scaled;
             }
             // 버튼도 바로 복사
@@ -146,13 +146,13 @@ void updateSharedState(const JoystickState &localState, double alpha, double dea
         filteredRaw[i] = lowpassFilter_Joy(filteredRaw[i], localState.axes[i], alpha);
         
         // Normalize the filtered raw value.
-        double normalized = normalizeAxisValue(filteredRaw[i]);
+        float normalized = normalizeAxisValue(filteredRaw[i]);
         
         // Apply scaling function: dead zone + gradual ramp-up.
-        double scaled = scaleJoystickOutput(normalized, deadZoneThreshold);
+        float scaled = scaleJoystickOutput(normalized, deadZoneThreshold);
 #ifdef SLEW
         // Limit the rate of change for smoother transitions.
-        double finalOutput = applySlewRate(head_shared.axes[i], scaled, maxDelta);
+        float finalOutput = applySlewRate(head_shared.axes[i], scaled, maxDelta);
         head_shared.axes[i] = finalOutput;
 #else
         head_shared.axes[i] = scaled;
@@ -183,21 +183,21 @@ void updateSharedState(const JoystickState &localState, double alpha, double dea
  * @param state      현재 버튼 상태가 담긴 구조체
  * @param accumStep  한 스텝당 누적할 양 (초 또는 임의 단위)
  */
-void updateAccumulators(const JoystickState &state, double accumStep) {
+void updateAccumulators(const JoystickState &state, float accumStep) {
     // L1 (BUTTON_L1) 누르면 감소, R1 누르면 증가
     if (state.buttons[BUTTON_L1]) {
-        lr1_accumulated = std::clamp(lr1_accumulated - accumStep, -1.0, 1.0);
+        lr1_accumulated = std::clamp(lr1_accumulated - accumStep, -1.0f, 1.0f);
     }
     if (state.buttons[BUTTON_R1]) {
-        lr1_accumulated = std::clamp(lr1_accumulated + accumStep, -1.0, 1.0);
+        lr1_accumulated = std::clamp(lr1_accumulated + accumStep, -1.0f, 1.0f);
     }
 
     // L2 (BUTTON_L2) 누르면 감소, R2 누르면 증가
     if (state.buttons[BUTTON_L2]) {
-        lr2_accumulated = std::clamp(lr2_accumulated - accumStep, -1.0, 1.0);
+        lr2_accumulated = std::clamp(lr2_accumulated - accumStep, -1.0f, 1.0f);
     }
     if (state.buttons[BUTTON_R2]) {
-        lr2_accumulated = std::clamp(lr2_accumulated + accumStep, -1.0, 1.0);
+        lr2_accumulated = std::clamp(lr2_accumulated + accumStep, -1.0f, 1.0f);
     }
 }
 
@@ -235,10 +235,10 @@ void readJoystickEvents(bool &continueJoystickThread) {
     struct js_event event;
     
     // Low-pass filter coefficient and dead zone threshold
-    double alpha = DEFAULT_ALPHA;              // Filter coefficient (0.0 ~ 1.0)
-    double deadZoneThreshold = DEFAULT_DEADZONE;  // Dead zone threshold (user-defined)
+    float alpha = DEFAULT_ALPHA;              // Filter coefficient (0.0 ~ 1.0)
+    float deadZoneThreshold = DEFAULT_DEADZONE;  // Dead zone threshold (user-defined)
     
-    // localState: holds raw axis and button data (as double for axes)
+    // localState: holds raw axis and button data (as float for axes)
     JoystickState localState = {0};
     
     // 원하는 루프 주기 (마이크로초 단위)
@@ -257,8 +257,8 @@ void readJoystickEvents(bool &continueJoystickThread) {
             if (type == JS_EVENT_AXIS) {
                 int axis_index = event.number;
                 if (axis_index < MAX_AXES) {
-                    // Store the raw value (as double) from the event.
-                    localState.axes[axis_index] = static_cast<double>(event.value);
+                    // Store the raw value (as float) from the event.
+                    localState.axes[axis_index] = static_cast<float>(event.value);
 #ifdef Data_print
                     std::cout << "Axis " << axis_index 
                               << " raw: " << event.value << std::endl;
@@ -283,7 +283,7 @@ void readJoystickEvents(bool &continueJoystickThread) {
 
         // 3) 초기화 완료 조건: INIT_DELAY_SEC 경과 + START 버튼 눌림
         if (!initDone) {
-            double elapsed_init = std::chrono::duration_cast<std::chrono::seconds>(
+            float elapsed_init = std::chrono::duration_cast<std::chrono::seconds>(
                                  std::chrono::steady_clock::now() - startTime
                              ).count();
             if (elapsed_init >= INIT_DELAY_SEC
