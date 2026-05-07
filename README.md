@@ -2,7 +2,9 @@
 
 리눅스 시스템(`/dev/input/js*`)에서 조이스틱 입력을 읽고 정밀하게 가공하여 제공하는 C++ 라이브러리입니다. 로봇 제어와 같은 실시간성 및 안전성이 중요한 시스템에 최적화되어 있습니다.
 
-## 주요 기능 (Detailed Features)
+![Joystick axis num](./images/joystickAxisNum.png)
+
+## 주요 기능
 
 ### 1. 스레드 분리 및 상태 관리 (State Processing)
 - 전용 백그라운드 스레드에서 `joy::runJoystickThread`가 동작하여 메인 제어 루프의 성능에 영향을 주지 않고 실시간으로 입력을 처리합니다.
