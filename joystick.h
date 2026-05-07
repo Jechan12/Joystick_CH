@@ -3,42 +3,57 @@
 
 #include <linux/joystick.h>  // js_event 등 조이스틱 타입 정의
 #include <atomic>
+#include <mutex>
 
 
 
+// =========================================================================================
+// ──  User Configuration Area (사용자 설정 영역)  ───────────────────────────────────────────
+// [설명] 필요에 따라 아래 값들을 자유롭게 변경하세요. (컴파일 시 적용됩니다)
+// 플레이스테이션 패드 기준 
+// =========================================================================================
+
+// 디버깅 출력을 켜려면 아래 주석을 해제하세요.
+// #define CONFIG_DATA_PRINT
+
+// 1. 조이스틱 장치 경로 (실제 연결된 장치가 js0, js1 인지 확인)
+#define CONFIG_JOYSTICK_DEVICE       "/dev/input/js0"
+
+// 2. 조이스틱 읽기 루프 주파수 (Hz 단위, 1000 = 1ms 주기)
+#define CONFIG_JOYSTICK_HZ           100
+
+// 3. 초기화 조건 (안전 장치)
+// 프로그램 시작 후 일정 시간(초)이 지나야 하며, 특정 시작 버튼을 눌러야 제어 입력이 들어갑니다.
+#define CONFIG_INIT_DELAY_SEC        3.0f  // 대기 시간 (초)
+#define CONFIG_BUTTON_START          11    // 시작 트리거 버튼 인덱스
+#define CONFIG_BUTTON_KILL           8     // 비상 정지(Kill Switch) 버튼 (PS 패드의 SHARE)
+
+// 4. 필터 및 조작감 설정
+#define CONFIG_FILTER_TAU            0.66f   // Low-pass 필터 시정수(초). 값이 클수록 묵직하고 느리게 반응.
+#define CONFIG_DEFAULT_DEADZONE      0.1f    // 데드존 (이하의 미세한 스틱 움직임 무시)
+
+// 5. 버튼 누적기 (가상 축) 속도 조절
+// L1/R1, L2/R2 버튼을 누르고 있을 때 초당 얼마나 증감할지 결정 (1.0 = 초당 1.0 누적)
+#define CONFIG_ACCUM_RATE            1.0f
+
+// 6. Slew-rate 제한 기능 (스틱의 급격한 조작 방지)
+// 활성화하려면 아래 주석을 해제하세요.
+// #define CONFIG_USE_SLEW
+#define CONFIG_SLEW_INITIAL_MAX_RATE   100.0f  // 처음 스위치 타임 동안의 초당 최대 변화량 (100.0 = 0.01초만에 0->1 도달)
+#define CONFIG_SLEW_RUNNING_MAX_RATE   1.0f    // 이후 안정화 상태에서의 초당 최대 변화량 (1.0 = 1초만에 0->1 도달)
+#define CONFIG_SLEW_SWITCH_TIME_S      1.0f    // 스위치 타임 (초)
+
+// 7. 시스템 버튼 인덱스 매핑 (패드 종류에 따라 다를 수 있음)
+#define CONFIG_BUTTON_L1             4
+#define CONFIG_BUTTON_R1             5
+#define CONFIG_BUTTON_L2             6
+#define CONFIG_BUTTON_R2             7
+
+// =========================================================================================
 
 namespace joy { 
-// Debug real-time output control (uncomment to enable output)
-// #define Data_print
 
-extern std::atomic<bool> inputEnabled;    // true여야만 readJoystickEvents가 값을 반영합니다.
-
-// ──  Configuration Constants  ────────────────────────────────────────────────────────────────
-// #define SLEW                   // 정의하면 lowpass filter 친 이후에 SLEW 까지 적용하여 maxdelta 제한
-
-/////////           [ Adjust as needed , 필요에 따라 조정하세요 ]        ///////////////////////////
-// Joystick device path
-constexpr char   JOYSTICK_DEVICE[]       = "/dev/input/js0";  // Actual device path (check if it's js0, js1, etc.)
-
-// Loop timing (in microseconds)
-constexpr unsigned   JOYSTICK_LOOP_US        = 1000;   // 1 ms
-
- // Low-pass filter coefficient and dead-zone threshold
-constexpr float DEFAULT_ALPHA           = 0.0015f;    // 필터 계수 [0.0 ~ 1.0] 
-constexpr float DEFAULT_DEADZONE        = 0.1f;    // normalized units
-
-// Slew-rate limiting
-constexpr float SLEW_INITIAL_MAX_DELTA  = 0.1f;    // first SLEW_SWITCH_TIME_S seconds
-constexpr float SLEW_RUNNING_MAX_DELTA  = 0.001f;  // 이후
-constexpr float SLEW_SWITCH_TIME_S      = 1.0f;    // seconds
-
-// Button indices for accumulators
-constexpr int    BUTTON_L1               = 4;
-constexpr int    BUTTON_R1               = 5;
-constexpr int    BUTTON_L2               = 6;
-constexpr int    BUTTON_R2               = 7;
-
-constexpr double accumStep = 0.001; // L1&R1 , L2&R2 누적 값 . 속도조절 
+extern std::atomic<bool> inputEnabled;    // true여야만 runJoystickThread가 조작을 반영합니다.
 
 // Raw axis value max (abs). negative 방향과 positive 방향이 약간 다르므로 분리.
 constexpr float RAW_AXIS_MAX_NEG        = 32767.0f;  // 음수 측 최대 절대값
@@ -48,31 +63,17 @@ constexpr float RAW_AXIS_MAX_POS        = 32767.0f;  // 양수 측 최대 절대
 constexpr int MAX_AXES =  8;
 constexpr int MAX_BUTTONS =  13;
 
-// 초기화 완료까지 대기할 시간 (초)
-constexpr float INIT_DELAY_SEC = 3.0f;
-// 시간과 함께 값 받아오기 시작할 버튼
-constexpr int BUTTON_START = 11;
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
 
 // Shared state variable: Data to be read by the controller thread
 struct JoystickState {
     float axes[MAX_AXES];   // Normalized values after applying low-pass filter
     int buttons[MAX_BUTTONS]; // Button states (0 or 1)
+    float lr1_accumulated;  // 누적기 1 (L1/R1)
+    float lr2_accumulated;  // 누적기 2 (L2/R2)
 };
 
-// Global shared state variable for axes/buttons
-// 전역 공유 상태 변수: low-pass 필터 → 정규화 → 스케일링된 축 값과 버튼 상태를 보관합니다.
-extern JoystickState head_shared;
-
-// Shared accumulative variables for button counts:
-// For L1 (button index 4) and R1 (button index 5): pressing L1 decrements, R1 increments.
-// 누적 버튼 카운터 - lr1_accumulated: L1(버튼 4)을 누르면 값이 감소하고, R1(버튼 5)을 누르면 값이 증가합니다.
-extern float lr1_accumulated;
-
-// For L2 (button index 6) and R2 (button index 7): pressing L2 decrements, R2 increments.
-// 누적 버튼 카운터 - lr2_accumulated: L2(버튼 6)을 누르면 값이 감소하고, R2(버튼 7)을 누르면 값이 증가합니다
-extern float lr2_accumulated;
+// 스레드 안전하게 최신 조이스틱 상태를 가져오는 함수 (외부에서 호출)
+JoystickState getJoystickState();
 
 
 /**
@@ -87,13 +88,13 @@ extern float lr2_accumulated;
  *    ACCUM_STEP 만큼 감소/증가시켜 누적값을 갱신
  * 4. updateSharedState() 호출을 통해
  *    low-pass 필터 → 정규화 → 데드존+스케일링 → 슬루율 제한 순으로
- *    최종 축 값을 head_shared.axes에 저장, 버튼 상태는 head_shared.buttons에 복사
- * 5. 루프 주기(JOYSTICK_LOOP_US 마이크로초)를 맞춰 usleep으로 대기
+ *    최종 축 값을 내부 상태에 안전하게 갱신
+ * 5. 루프 주파수(CONFIG_JOYSTICK_HZ)를 맞춰 usleep으로 대기
  * 6. 외부에서 continueJoystickThread를 false로 설정하면 루프를 빠져나가고 디바이스를 close
  *
  * @param continueJoystickThread  true인 동안 루프 실행, false로 변경 시 루프 종료
  */
-void readJoystickEvents(bool &continueJoystickThread);
+void runJoystickThread(bool &continueJoystickThread);
 
 }  // namespace joy
 #endif // JOYSTICK_H

@@ -2,47 +2,39 @@
 
 This repository provides a C++ library for reading and processing joystick input on Linux (`/dev/input/js*`). It supports:
 
-- Low-pass filtering  
+- Low-pass filtering (Hz-independent Time Constant $\tau$)
 - Dead-zone handling  
 - Normalization to [–1, +1]  
 - Quadratic “ramp-up” scaling  
-- Optional slew-rate limiting  
-- Accumulative button counters  
-- **Initialization gating** (time + button)  
-- A hard real-time 1 kHz loop  
+- Optional slew-rate limiting (Hz-independent)
+- Accumulative button counters (Time-based integration)
+- **Initialization gating** (Time + START button)
+- **Kill Switch (E-Stop)** support
+- Thread-safe state access via `std::mutex`
 
 ![Joystick axis num](./images/joystickAxisNum.png)
 
 ## Features
 
 - **State Processing**  
-  A dedicated thread runs `joy::readJoystickEvents(running)` to:
-  1. Open the joystick device (`JOYSTICK_DEVICE`) in non-blocking mode  
-  2. Read `js_event` messages for axes and buttons  
-  3. Update `joy::head_shared.axes[]` (double in [–1,1]) and `joy::head_shared.buttons[]` (0/1)  
+  A dedicated background thread runs `joy::runJoystickThread(running)` to:
+  1. Open the joystick device (`CONFIG_JOYSTICK_DEVICE`)
+  2. Handle automatic disconnection and reconnection logic.
+  3. Safely update internal states protected by `std::mutex`.
 
-- **Low-Pass Filter & Dead-Zone**  
-  - `joy::lowpassFilter_Joy(prev, cur, DEFAULT_ALPHA)` smooths out noise.  
-  - Inputs within `±DEFAULT_DEADZONE` map to zero to ignore small jitters.
-
-- **Quadratic Scaling & Optional Slew-Rate**  
-  - `joy::scaleJoystickOutput(x, DEFAULT_DEADZONE)` applies an x² curve for smooth ramp-up.  
-  - Define `SLEW` to also apply `joy::applySlewRate(...)`, which clamps each step’s change to **SLEW_INITIAL_MAX_DELTA** (first second) or **SLEW_RUNNING_MAX_DELTA** thereafter.
+- **Hz-Independent Low-Pass Filter & Slew-Rate**  
+  - The filter uses a time constant `CONFIG_FILTER_TAU` rather than a fixed alpha, ensuring the same control feel regardless of loop frequency.
+  - Slew-rate is implemented as `RatePerSecond * dt`.
 
 - **Accumulative Button Counters**  
-  - `joy::lr1_accumulated` is decreased by **ACCUM_STEP** when L1 (button 4) is pressed and increased by **ACCUM_STEP** when R1 (button 5) is pressed.  
-  - `joy::lr2_accumulated` likewise for L2 (6) / R2 (7).  
-  - Values are clamped to [–1, +1].
+  - L1/R1 and L2/R2 buttons increase/decrease virtual axes using a time-based rate (`CONFIG_ACCUM_RATE`), ensuring smooth and consistent accumulation over time.
 
-- **Initialization Gating (Time + Button)**  
-  - The library will ignore **axis** updates until:
-    1. **INIT_DELAY_SEC** seconds have elapsed since `readJoystickEvents` started, **and**  
-    2. The **START** button (`BUTTON_START`) is pressed.  
-  - During this “init delay” only the START button state is visible; all other inputs are held at zero.  
-  - Tweak `INIT_DELAY_SEC` (in `joystick.h`) to set the delay, or set it to `0.0` to require only the START-button press.
+- **Initialization & Kill Switch**  
+  - **INIT**: The library ignores axis updates until `CONFIG_INIT_DELAY_SEC` has passed AND the `CONFIG_BUTTON_START` is pressed.
+  - **KILL**: Pressing `CONFIG_BUTTON_KILL` (e.g., SELECT/SHARE) instantly disables inputs and zeroes all outputs until START is pressed again.
 
-- **Hard Real-Time 1 kHz Loop**  
-  Each iteration measures its own duration and sleeps the remainder of **JOYSTICK_LOOP_US** (1 ms) via `usleep()`, ensuring a consistent 1 kHz update rate.
+- **Thread-Safe Consumer API**
+  - External loops (like the robot controller) do not access variables directly. They call `joy::JoystickState state = joy::getJoystickState();` to get a thread-safe copy of the latest joystick state, avoiding data tearing and race conditions.
 
 ## File Structure
 ```plaintext
@@ -57,30 +49,25 @@ This repository provides a C++ library for reading and processing joystick input
 
 ### joystick.h
 
-- **Tunable constants**  
-  - `JOYSTICK_DEVICE`, `JOYSTICK_LOOP_US`, `DEFAULT_ALPHA`, `DEFAULT_DEADZONE`  
-  - `SLEW_INITIAL_MAX_DELTA`, `SLEW_RUNNING_MAX_DELTA`, `SLEW_SWITCH_TIME_S`  
-  - `BUTTON_L1…R2`, `ACCUM_STEP`, `RAW_AXIS_MAX_NEG/POS`  
-  - **`INIT_DELAY_SEC`**, **`BUTTON_START`** (init gating)  
-- **Initialization flag**  
-  - `extern std::atomic<bool> inputEnabled;`  
-- **Public types & globals**  
-  - `struct JoystickState { double axes[MAX_AXES]; int buttons[MAX_BUTTONS]; }`  
-  - `extern JoystickState head_shared;`  
-  - `extern double lr1_accumulated, lr2_accumulated;`  
-- **Public API**  
-  - `void readJoystickEvents(bool &running);`
+- **Tunable constants (User Configuration Area)**  
+  - `CONFIG_JOYSTICK_DEVICE`, `CONFIG_JOYSTICK_HZ`
+  - `CONFIG_INIT_DELAY_SEC`, `CONFIG_BUTTON_START`, `CONFIG_BUTTON_KILL`
+  - `CONFIG_FILTER_TAU`, `CONFIG_ACCUM_RATE`, `CONFIG_DEFAULT_DEADZONE`
+- **Public types & API**  
+  - `struct JoystickState { float axes[MAX_AXES]; int buttons[MAX_BUTTONS]; float lr1_accumulated; float lr2_accumulated; }`
+  - `JoystickState getJoystickState();` (Thread-safe getter)
+  - `void runJoystickThread(bool &continueJoystickThread);`
 
 ### joystick.cpp
 
-- Implements all helper functions inside an anonymous namespace:  
-  `lowpassFilter_Joy`, `normalizeAxisValue`, `scaleJoystickOutput`, `applySlewRate`, `updateSharedState`, `updateAccumulators`  
-- Defines `joy::readJoystickEvents(...)`, including the **5-second + START-button gating** via `inputEnabled`.
+- Implements the background thread `runJoystickThread(...)`.
+- Internal state `static JoystickState head_shared;` is protected by `std::mutex joystick_mutex;`.
+- Handles USB/Bluetooth disconnection smoothly without crashing.
 
 ### demo/main.cpp
 
-- Spawns a `std::thread` running `joy::readJoystickEvents(running)`  
-- In the main thread, prints `joy::head_shared` and `joy::lr?_accumulated` every 10 ms
+- Spawns a `std::thread` running `joy::runJoystickThread`.
+- Continuously calls `joy::getJoystickState()` to print the latest axes, buttons, and accumulated values.
 
 ## Building & Running
 
@@ -92,8 +79,9 @@ This repository provides a C++ library for reading and processing joystick input
 ```bash
 cd demo
 
-# Build (SLEW optional via -DSLEW)
-g++ -std=c++17 -I.. main.cpp ../joystick.cpp -o joystick_test -pthread
+# Build the demo using the provided Makefile
+make
 
 # Run
 ./joystick_test
+```

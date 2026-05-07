@@ -12,12 +12,14 @@ namespace joy {
 // 초기값은 false (입력 무시)
 std::atomic<bool> inputEnabled{false};
 
-// Global shared state variable definition (must be defined exactly once)
-// 전역 상태 변수 정의 (헤더에서 extern으로 선언됨)
-JoystickState head_shared = {0};
+// 내부 스레드에서 관리되는 전역 상태 변수 (뮤텍스로 보호됨)
+static JoystickState head_shared = {0};
+std::mutex joystick_mutex;
 
-float lr1_accumulated = 0.0f;
-float lr2_accumulated = 0.0f;
+JoystickState getJoystickState() {
+    std::lock_guard<std::mutex> lock(joystick_mutex);
+    return head_shared;
+}
 
 // Low-pass filter function (exponential moving average)
 float lowpassFilter_Joy(float previous, float current, float alpha) {
@@ -95,7 +97,7 @@ float normalizeAxisValue(float raw) {
  * @brief updateSharedState
  *
  * localState.axes[]에 들어온 raw 축 값을 아래 순서로 처리하여
- * head_shared.axes[]에 저장하고, 버튼 상태는 그대로 복사합니다.
+ * 내부 상태(head_shared)에 저장하고, 버튼 상태는 그대로 복사합니다.
  *
  *  1) lowpassFilter_Joy로 노이즈 제거
  *  2) normalizeAxisValue로 –1~1 정규화
@@ -106,15 +108,19 @@ float normalizeAxisValue(float raw) {
  * @param alpha             필터 계수
  * @param deadZoneThreshold dead zone 임계치
  */
-void updateSharedState(const JoystickState &localState, float alpha, float deadZoneThreshold) {
+void updateSharedState(const JoystickState &localState, float dt, float deadZoneThreshold) {
     
+    // Time constant to alpha conversion for EMA filter
+    float alpha = dt / (CONFIG_FILTER_TAU + dt);
+
     // Use static variable to record the initial time.
     static auto initTime = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     float elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - initTime).count() / 1000.0f;
     
-    // Set maxDelta: 0.1 for first 1 second, then 0.001.
-    float maxDelta = (elapsed < SLEW_SWITCH_TIME_S) ? SLEW_INITIAL_MAX_DELTA : SLEW_RUNNING_MAX_DELTA;
+    // Set maxDelta based on max rate per second * dt
+    float maxRate = (elapsed < CONFIG_SLEW_SWITCH_TIME_S) ? CONFIG_SLEW_INITIAL_MAX_RATE : CONFIG_SLEW_RUNNING_MAX_RATE;
+    float maxDelta = maxRate * dt;
 
     // 첫 호출일 때는 filteredRaw를 raw 값으로 채워서 
     // 0→–1 과도 현상을 방지합니다. (특히 L2 R2)
@@ -150,7 +156,7 @@ void updateSharedState(const JoystickState &localState, float alpha, float deadZ
         
         // Apply scaling function: dead zone + gradual ramp-up.
         float scaled = scaleJoystickOutput(normalized, deadZoneThreshold);
-#ifdef SLEW
+#ifdef CONFIG_USE_SLEW
         // Limit the rate of change for smoother transitions.
         float finalOutput = applySlewRate(head_shared.axes[i], scaled, maxDelta);
         head_shared.axes[i] = finalOutput;
@@ -183,47 +189,49 @@ void updateSharedState(const JoystickState &localState, float alpha, float deadZ
  * @param state      현재 버튼 상태가 담긴 구조체
  * @param accumStep  한 스텝당 누적할 양 (초 또는 임의 단위)
  */
-void updateAccumulators(const JoystickState &state, float accumStep) {
-    // L1 (BUTTON_L1) 누르면 감소, R1 누르면 증가
-    if (state.buttons[BUTTON_L1]) {
-        lr1_accumulated = std::clamp(lr1_accumulated - accumStep, -1.0f, 1.0f);
+void updateAccumulators(const JoystickState &state, float dt) {
+    float accumStep = CONFIG_ACCUM_RATE * dt;
+
+    // L1 (CONFIG_BUTTON_L1) 누르면 감소, R1 누르면 증가
+    if (state.buttons[CONFIG_BUTTON_L1]) {
+        head_shared.lr1_accumulated = std::clamp(head_shared.lr1_accumulated - accumStep, -1.0f, 1.0f);
     }
-    if (state.buttons[BUTTON_R1]) {
-        lr1_accumulated = std::clamp(lr1_accumulated + accumStep, -1.0f, 1.0f);
+    if (state.buttons[CONFIG_BUTTON_R1]) {
+        head_shared.lr1_accumulated = std::clamp(head_shared.lr1_accumulated + accumStep, -1.0f, 1.0f);
     }
 
-    // L2 (BUTTON_L2) 누르면 감소, R2 누르면 증가
-    if (state.buttons[BUTTON_L2]) {
-        lr2_accumulated = std::clamp(lr2_accumulated - accumStep, -1.0f, 1.0f);
+    // L2 (CONFIG_BUTTON_L2) 누르면 감소, R2 누르면 증가
+    if (state.buttons[CONFIG_BUTTON_L2]) {
+        head_shared.lr2_accumulated = std::clamp(head_shared.lr2_accumulated - accumStep, -1.0f, 1.0f);
     }
-    if (state.buttons[BUTTON_R2]) {
-        lr2_accumulated = std::clamp(lr2_accumulated + accumStep, -1.0f, 1.0f);
+    if (state.buttons[CONFIG_BUTTON_R2]) {
+        head_shared.lr2_accumulated = std::clamp(head_shared.lr2_accumulated + accumStep, -1.0f, 1.0f);
     }
 }
 
 
 /*
-   readJoystickEvents() reads raw joystick events and processes them:
+   runJoystickThread() reads raw joystick events and processes them:
    - Raw event data is stored in a local JoystickState structure.
    - For each event, if it's an axis event, its raw value is stored.
    - Finally, updateSharedState() is called to process axis data.
 */
 /**
- * @brief readJoystickEvents
+ * @brief runJoystickThread
  *
  * 논블록킹으로 조이스틱 이벤트(/dev/input/js0)를 읽어
  * 1) 축/버튼 이벤트를 localState에 저장
  * 2) updateAccumulators 호출해 버튼 누적값 갱신
  * 3) updateSharedState 호출해 축 값 필터·정규화·스케일링·슬루 적용
- * 4) JOYSTICK_LOOP_US 주기로 루프
+ * 4) CONFIG_JOYSTICK_HZ 주파수로 루프
  *
  * 외부에서 continueJoystickThread를 false로 바꾸면
  * 디바이스를 close하고 함수가 종료됩니다.
  *
  * @param continueJoystickThread  루프 동작 제어 변수
  */
-void readJoystickEvents(bool &continueJoystickThread) {
-    const char* devicePath = JOYSTICK_DEVICE;  
+void runJoystickThread(bool &continueJoystickThread) {
+    const char* devicePath = CONFIG_JOYSTICK_DEVICE;  
     int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         std::cerr << "Unable to open joystick device: " << devicePath << std::endl;
@@ -235,23 +243,56 @@ void readJoystickEvents(bool &continueJoystickThread) {
     struct js_event event;
     
     // Low-pass filter coefficient and dead zone threshold
-    float alpha = DEFAULT_ALPHA;              // Filter coefficient (0.0 ~ 1.0)
-    float deadZoneThreshold = DEFAULT_DEADZONE;  // Dead zone threshold (user-defined)
+    float deadZoneThreshold = CONFIG_DEFAULT_DEADZONE;  // Dead zone threshold (user-defined)
     
     // localState: holds raw axis and button data (as float for axes)
     JoystickState localState = {0};
     
-    // 원하는 루프 주기 (마이크로초 단위)
-    const long DESIRED_LOOP_US = JOYSTICK_LOOP_US; // 1ms
+    // 원하는 루프 주기 계산 (마이크로초 단위)
+    const long DESIRED_LOOP_US = 1000000 / CONFIG_JOYSTICK_HZ; 
 
     auto startTime = std::chrono::steady_clock::now();
     bool initDone = false;
 
+    auto last_time = std::chrono::steady_clock::now();
+
     while (continueJoystickThread) {
         // 루프 시작 시각 기록  
         auto loop_start = std::chrono::steady_clock::now();
+        float dt = std::chrono::duration_cast<std::chrono::microseconds>(loop_start - last_time).count() / 1000000.0f;
+        last_time = loop_start;
 
         ssize_t bytes = read(fd, &event, sizeof(event));
+        
+        // 1. 디스커넥트 처리 (Issue 1)
+        if (bytes < 0 && errno != EAGAIN) {
+            std::cerr << "[CRITICAL] Joystick disconnected! Stopping robot." << std::endl;
+            close(fd);
+            fd = -1;
+
+            // 상태 초기화
+            localState = {0};
+            {
+                std::lock_guard<std::mutex> lock(joystick_mutex);
+                head_shared = {0};
+            }
+            inputEnabled.store(false);
+            initDone = false;
+
+            // 재연결 대기
+            while (continueJoystickThread && fd < 0) {
+                std::cout << "Waiting for joystick reconnection..." << std::endl;
+                usleep(1000000); // 1초 대기
+                fd = open(devicePath, O_RDONLY | O_NONBLOCK);
+            }
+            if (fd >= 0) {
+                std::cout << "[INFO] Joystick reconnected!" << std::endl;
+                startTime = std::chrono::steady_clock::now();
+                last_time = std::chrono::steady_clock::now();
+            }
+            continue;
+        }
+
         if (bytes == sizeof(event)) {
             unsigned char type = event.type & ~JS_EVENT_INIT;
             if (type == JS_EVENT_AXIS) {
@@ -259,7 +300,7 @@ void readJoystickEvents(bool &continueJoystickThread) {
                 if (axis_index < MAX_AXES) {
                     // Store the raw value (as float) from the event.
                     localState.axes[axis_index] = static_cast<float>(event.value);
-#ifdef Data_print
+#ifdef CONFIG_DATA_PRINT
                     std::cout << "Axis " << axis_index 
                               << " raw: " << event.value << std::endl;
 #endif
@@ -268,26 +309,47 @@ void readJoystickEvents(bool &continueJoystickThread) {
                 int button_index = event.number;
                 if (button_index < MAX_BUTTONS) {
                     localState.buttons[button_index] = event.value;
-#ifdef Data_print
+#ifdef CONFIG_DATA_PRINT
                     std::cout << "Button " << button_index 
                               << " state: " << event.value << std::endl;
 #endif
                 }
             }
         }
+
+        // 2. Kill Switch (비상 정지) 처리 (Issue 3)
+        if (localState.buttons[CONFIG_BUTTON_KILL] == 1) {
+            if (inputEnabled.load()) {
+                std::cerr << "[WARNING] Kill Switch (SELECT) Pressed! Disabling inputs." << std::endl;
+            }
+            inputEnabled.store(false);
+            initDone = false;
+            localState = {0};
+            {
+                std::lock_guard<std::mutex> lock(joystick_mutex);
+                head_shared = {0};
+            }
+        }
         
         // 2) initDone 전에는 START 버튼만 복사
         if (!initDone) {
-            head_shared.buttons[BUTTON_START] = localState.buttons[BUTTON_START];
+            std::lock_guard<std::mutex> lock(joystick_mutex);
+            head_shared.buttons[CONFIG_BUTTON_START] = localState.buttons[CONFIG_BUTTON_START];
         }
 
-        // 3) 초기화 완료 조건: INIT_DELAY_SEC 경과 + START 버튼 눌림
+        // 3) 초기화 완료 조건: CONFIG_INIT_DELAY_SEC 경과 + START 버튼 눌림
         if (!initDone) {
             float elapsed_init = std::chrono::duration_cast<std::chrono::seconds>(
                                  std::chrono::steady_clock::now() - startTime
                              ).count();
-            if (elapsed_init >= INIT_DELAY_SEC
-                && head_shared.buttons[BUTTON_START] == 1)
+            
+            bool start_pressed = false;
+            {
+                std::lock_guard<std::mutex> lock(joystick_mutex);
+                start_pressed = (head_shared.buttons[CONFIG_BUTTON_START] == 1);
+            }
+
+            if (elapsed_init >= CONFIG_INIT_DELAY_SEC && start_pressed)
             {
                 inputEnabled.store(true);
                 initDone = true;
@@ -297,11 +359,12 @@ void readJoystickEvents(bool &continueJoystickThread) {
 
         // **입력 허용 플래그가 true일 때만 실제 반영**  
         if (inputEnabled.load()) {
-            updateAccumulators(localState, accumStep);
-            
+            std::lock_guard<std::mutex> lock(joystick_mutex);
+            updateAccumulators(localState, dt);
             // Process the raw axis data: apply filtering, normalization, scaling, and slew rate limiting.
-            updateSharedState(localState, alpha, deadZoneThreshold);
+            updateSharedState(localState, dt, deadZoneThreshold);
         }
+
         // 루프 종료 시각 기록
         auto loop_end = std::chrono::steady_clock::now();
         // 실제 걸린 시간(마이크로초)
