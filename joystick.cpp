@@ -234,11 +234,11 @@ void runJoystickThread(bool &continueJoystickThread) {
     const char* devicePath = CONFIG_JOYSTICK_DEVICE;  
     int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
-        std::cerr << "Unable to open joystick device: " << devicePath << std::endl;
+        std::cerr << "[JoyStick] Unable to open joystick device: " << devicePath << std::endl;
         return;
     }
     
-    std::cout << "Joystick device " << devicePath << " connected successfully" << std::endl;
+    std::cout << "[JoyStick] device " << devicePath << " connected successfully" << std::endl;
     
     struct js_event event;
     
@@ -266,7 +266,7 @@ void runJoystickThread(bool &continueJoystickThread) {
         
         // 1. 디스커넥트 처리 (Issue 1)
         if (bytes < 0 && errno != EAGAIN) {
-            std::cerr << "[CRITICAL] Joystick disconnected! Stopping robot." << std::endl;
+            std::cerr << "[JoyStick] [CRITICAL] Joystick disconnected! Stopping robot." << std::endl;
             close(fd);
             fd = -1;
 
@@ -281,12 +281,12 @@ void runJoystickThread(bool &continueJoystickThread) {
 
             // 재연결 대기
             while (continueJoystickThread && fd < 0) {
-                std::cout << "Waiting for joystick reconnection..." << std::endl;
+                std::cout << "[JoyStick] Waiting for joystick reconnection..." << std::endl;
                 usleep(1000000); // 1초 대기
                 fd = open(devicePath, O_RDONLY | O_NONBLOCK);
             }
             if (fd >= 0) {
-                std::cout << "[INFO] Joystick reconnected!" << std::endl;
+                std::cout << "[JoyStick] [INFO] Joystick reconnected!" << std::endl;
                 startTime = std::chrono::steady_clock::now();
                 last_time = std::chrono::steady_clock::now();
             }
@@ -320,7 +320,7 @@ void runJoystickThread(bool &continueJoystickThread) {
         // 2. Kill Switch (비상 정지) 처리 (Issue 3)
         if (localState.buttons[CONFIG_BUTTON_KILL] == 1) {
             if (inputEnabled.load()) {
-                std::cerr << "[WARNING] Kill Switch (SELECT) Pressed! Disabling inputs." << std::endl;
+                std::cerr << "[JoyStick] [WARNING] Kill Switch (SELECT) Pressed! Disabling inputs." << std::endl;
             }
             inputEnabled.store(false);
             initDone = false;
@@ -353,7 +353,7 @@ void runJoystickThread(bool &continueJoystickThread) {
             {
                 inputEnabled.store(true);
                 initDone = true;
-                std::cout << "[INFO] Joystick enabled after START pressed.\n";
+                std::cout << "[JoyStick] [INFO] Joystick enabled after START pressed.\n";
             }
         }
 

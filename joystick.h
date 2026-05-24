@@ -24,7 +24,7 @@
 
 // 3. 초기화 조건 (안전 장치)
 // 프로그램 시작 후 일정 시간(초)이 지나야 하며, 특정 시작 버튼을 눌러야 제어 입력이 들어갑니다.
-#define CONFIG_INIT_DELAY_SEC        3.0f  // 대기 시간 (초)
+#define CONFIG_INIT_DELAY_SEC        2.0f  // 대기 시간 (초)
 #define CONFIG_BUTTON_START          11    // 시작 트리거 버튼 인덱스
 #define CONFIG_BUTTON_KILL           8     // 비상 정지(Kill Switch) 버튼 (PS 패드의 SHARE)
 
