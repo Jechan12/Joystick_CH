@@ -34,7 +34,7 @@
 
 // 5. 버튼 누적기 (가상 축) 속도 조절
 // L1/R1, L2/R2 버튼을 누르고 있을 때 초당 얼마나 증감할지 결정 (1.0 = 초당 1.0 누적)
-#define CONFIG_ACCUM_RATE            1.0f
+#define CONFIG_ACCUM_RATE            0.5f
 
 // 6. Slew-rate 제한 기능 (스틱의 급격한 조작 방지)
 // 활성화하려면 아래 주석을 해제하세요.
