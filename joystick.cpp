@@ -21,9 +21,34 @@ std::atomic<bool> inputEnabled{false};
 static JoystickState head_shared = {0};
 std::mutex joystick_mutex;
 
+// updateSharedState가 사용하는 LPF 필터 상태 (스텝 간 유지).
+// 재연결/Kill Switch 시 옛 방향값이 남아 출력이 튀는 것을 막기 위해
+// 파일 스코프로 두고 resetFilterState()로 초기화한다.
+static bool  g_firstCall = true;
+static float g_filteredRaw[joy::MAX_AXES] = {0.0f};
+
 JoystickState getJoystickState() {
     std::lock_guard<std::mutex> lock(joystick_mutex);
     return head_shared;
+}
+
+/**
+ * @brief resetFilterState
+ *
+ * updateSharedState 내부의 LPF 필터 상태(g_filteredRaw)와 g_firstCall을 초기화한다.
+ * 연결이 끊겼다 다시 붙을 때 직전 주행/회전 방향의 filteredRaw 잔상이 남아
+ * 입력이 그 방향으로 순간 튀는 현상을 막는다.
+ *
+ * g_firstCall = true 로 되돌리면 다음 updateSharedState 호출에서
+ * 현재 raw 값(보통 중립)으로 필터를 다시 채운다.
+ *
+ * 주의: joystick_mutex를 잡은 상태에서 호출할 것.
+ */
+void resetFilterState() {
+    g_firstCall = true;
+    for (int i = 0; i < joy::MAX_AXES; ++i) {
+        g_filteredRaw[i] = 0.0f;
+    }
 }
 
 // Low-pass filter function (exponential moving average)
@@ -127,20 +152,17 @@ void updateSharedState(const JoystickState &localState, float dt, float deadZone
     float maxRate = (elapsed < CONFIG_SLEW_SWITCH_TIME_S) ? CONFIG_SLEW_INITIAL_MAX_RATE : CONFIG_SLEW_RUNNING_MAX_RATE;
     float maxDelta = maxRate * dt;
 
-    // 첫 호출일 때는 filteredRaw를 raw 값으로 채워서 
-    // 0→–1 과도 현상을 방지합니다. (특히 L2 R2)
-    static bool firstCall = true;
-    
-    // Local filter state for each axis (persist between calls).
-    // We can use a static local array for this purpose.
-    static float filteredRaw[joy::MAX_AXES] = {0.0f};
-
-    if (firstCall) {
+    // 첫 호출(또는 재연결 후 resetFilterState 호출 직후)일 때는
+    // filteredRaw를 raw 값으로 채워서 0→–1 과도 현상 및
+    // 직전 방향값 잔상으로 인한 출력 스파이크를 방지합니다. (특히 L2 R2)
+    // 필터 상태(g_firstCall, g_filteredRaw)는 파일 스코프에 두어
+    // resetFilterState()로 외부에서 초기화할 수 있게 했습니다.
+    if (g_firstCall) {
             for (int i = 0; i < MAX_AXES; ++i) {
                 // raw 값 그대로 초기 세팅
-                filteredRaw[i] = localState.axes[i];
+                g_filteredRaw[i] = localState.axes[i];
                 // 즉시 head_shared에 반영 (데드존+스케일링만)
-                float norm   = normalizeAxisValue(filteredRaw[i]);
+                float norm   = normalizeAxisValue(g_filteredRaw[i]);
                 float scaled = scaleJoystickOutput(norm, deadZoneThreshold);
                 head_shared.axes[i] = scaled;
             }
@@ -148,16 +170,16 @@ void updateSharedState(const JoystickState &localState, float dt, float deadZone
             for (int i = 0; i < MAX_BUTTONS; ++i) {
                 head_shared.buttons[i] = localState.buttons[i];
             }
-            firstCall = false;
+            g_firstCall = false;
             return;
     }
-    
+
     for (int i = 0; i < joy::MAX_AXES; i++) {
         // Update the low-pass filtered raw value for this axis.
-        filteredRaw[i] = lowpassFilter_Joy(filteredRaw[i], localState.axes[i], alpha);
-        
+        g_filteredRaw[i] = lowpassFilter_Joy(g_filteredRaw[i], localState.axes[i], alpha);
+
         // Normalize the filtered raw value.
-        float normalized = normalizeAxisValue(filteredRaw[i]);
+        float normalized = normalizeAxisValue(g_filteredRaw[i]);
         
         // Apply scaling function: dead zone + gradual ramp-up.
         float scaled = scaleJoystickOutput(normalized, deadZoneThreshold);
@@ -279,7 +301,13 @@ void runJoystickThread(bool &continueJoystickThread) {
             localState = {0};
             {
                 std::lock_guard<std::mutex> lock(joystick_mutex);
+                float saved_lr1 = head_shared.lr1_accumulated;
+                float saved_lr2 = head_shared.lr2_accumulated;
                 head_shared = {0};
+                head_shared.lr1_accumulated = saved_lr1;
+                head_shared.lr2_accumulated = saved_lr2;
+                // 필터 잔상 제거: 재연결 시 직전 방향으로 튀는 것 방지
+                resetFilterState();
             }
             inputEnabled.store(false);
             initDone = false;
@@ -332,7 +360,13 @@ void runJoystickThread(bool &continueJoystickThread) {
             localState = {0};
             {
                 std::lock_guard<std::mutex> lock(joystick_mutex);
+                float saved_lr1 = head_shared.lr1_accumulated;
+                float saved_lr2 = head_shared.lr2_accumulated;
                 head_shared = {0};
+                head_shared.lr1_accumulated = saved_lr1;
+                head_shared.lr2_accumulated = saved_lr2;
+                // 필터 잔상 제거: 재활성화 시 직전 방향으로 튀는 것 방지
+                resetFilterState();
             }
         }
         
